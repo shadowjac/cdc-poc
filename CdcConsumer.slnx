@@ -1,0 +1,8 @@
+<Solution>
+  <Folder Name="/ExternalData/">
+    <File Path="docker-compose.yml" />
+  </Folder>
+  <Folder Name="/src/">
+    <Project Path="src/CdcConsumer/CdcConsumer.csproj" />
+  </Folder>
+</Solution>

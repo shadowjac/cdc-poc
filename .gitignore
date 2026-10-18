@@ -1,0 +1,22 @@
+# Build
+bin/
+obj/
+out/
+publish/
+
+.vs/
+.vscode/
+.idea/
+*.user
+*.suo
+*.DotSettings.user
+
+*.pfx
+.env
+
+TestResults/
+coverage/
+*.log
+
+# macOS
+.DS_Store

@@ -1,0 +1,23 @@
+{
+  "name": "sqlserver-orders",
+  "config": {
+    "connector.class": "io.debezium.connector.sqlserver.SqlServerConnector",
+    "database.hostname": "sqlserver",
+    "database.port": "1433",
+    "database.user": "sa",
+    "database.password": "YourPassw0rd1!",
+    "database.names": "poc-cdc",
+    "database.encrypt": "false",
+    "topic.prefix": "poc",
+    "table.include.list": "dbo.Orders",
+    "schema.history.internal.kafka.bootstrap.servers": "redpanda:9092",
+    "schema.history.internal.kafka.topic": "schema-history.poc",
+    "value.converter": "org.apache.kafka.connect.json.JsonConverter",
+    "value.converter.schemas.enable": "false",
+    "decimal.handling.mode": "string",
+    "transforms": "unwrap",
+    "transforms.unwrap.type": "io.debezium.transforms.ExtractNewRecordState",
+    "transforms.unwrap.add.fields": "op",
+    "transforms.unwrap.delete.handling.mode": "rewrite"
+  }
+}
