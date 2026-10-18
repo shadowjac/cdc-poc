@@ -1,6 +1,6 @@
 # CDC PoC: SQL Server → Debezium → Redpanda → .NET
 
-Proof of concept for **Change Data Capture (CDC)**: every `INSERT`, `UPDATE`, and `DELETE` on a SQL Server table is published as an event to Redpanda (Kafka-compatible) and consumed by a .NET application.
+Proof of concept for **Change Data Capture (CDC)**: every `INSERT`, `UPDATE`, and `DELETE` on a SQL Server table is published as an event to Redpanda (Kafka-compatible) and consumed by a .NET application, with logs and traces visible in the Aspire dashboard.
 
 ## Architecture
 
@@ -8,9 +8,10 @@ Proof of concept for **Change Data Capture (CDC)**: every `INSERT`, `UPDATE`, an
 flowchart LR
     U[SQL Client] -->|INSERT UPDATE DELETE| SQL[(SQL Server<br/>CDC enabled)]
     SQL -->|captured changes| DBZ[Debezium<br/>Kafka Connect]
-    DBZ -->|JSON events| RP[[Redpanda<br/>poc.poc-cdc.dbo.Orders]]
+    DBZ -->|JSON events| RP[["Redpanda<br/>poc.poc-cdc.dbo.Orders"]]
     RP --> APP[.NET Consumer<br/>BackgroundService]
     RP --> UI[Redpanda Console]
+    APP -.->|OTLP logs and traces| AD[Aspire Dashboard]
 ```
 
 ## Change flow
@@ -22,6 +23,7 @@ sequenceDiagram
     participant D as Debezium
     participant K as Redpanda
     participant C as .NET Consumer
+    participant A as Aspire Dashboard
 
     U->>DB: INSERT / UPDATE / DELETE
     DB->>DB: CDC capture job records the change
@@ -29,6 +31,7 @@ sequenceDiagram
     D->>K: Publishes event to the topic
     K->>C: Consume()
     C->>C: Processes the event
+    C->>A: Sends logs and trace (OTLP)
     C->>K: Commits the offset
 ```
 
@@ -39,7 +42,7 @@ flowchart TD
     A[Consume message] --> B{Value is null?}
     B -->|Yes, tombstone| E[Commit offset]
     B -->|No| C[Deserialize OrderRow]
-    C --> D[Process and log]
+    C --> D[Process, log and trace]
     D --> E
     E --> A
 ```
@@ -51,22 +54,27 @@ flowchart TD
 | Database | SQL Server 2022 (Docker) |
 | Change capture | Debezium (Kafka Connect) |
 | Broker | Redpanda |
-| Exploration | Redpanda Console |
+| Topic exploration | Redpanda Console |
+| Observability | Aspire Dashboard (standalone) + OpenTelemetry |
 | Consumer | .NET Worker Service + Confluent.Kafka |
 
-## Structure
+## Project structure
 
 ```text
-cdc-poc/
-├── docker-compose.yml
-├── connector.json
-├── CdcConsumer/
-│   ├── Program.cs
-│   ├── OrdersCdcConsumer.cs
-│   ├── KafkaOptions.cs
-│   ├── CdcJsonContext.cs
-│   └── appsettings.json
-└── README.md
+CdcConsumer/                      # Solution
+├── ExternalData/
+│   ├── docker-compose.yml
+│   └── README.md
+└── src/
+    └── CdcConsumer/              # Worker Service project
+        ├── Models/
+        ├──── CdcJsonContext.cs
+        ├──── OrderRow.cs
+        ├── appsettings.json
+        ├── appsettings.Development.json
+        ├── KafkaOptions.cs
+        ├── OrdersCdcConsumer.cs
+        └── Program.cs
 ```
 
 ## Requirements
@@ -80,6 +88,8 @@ cdc-poc/
 
 ### 1. Start the infrastructure
 
+From the `ExternalData/` folder:
+
 ```bash
 docker compose up -d
 docker compose ps
@@ -87,10 +97,12 @@ docker compose ps
 
 ### 2. Create the database and enable CDC
 
+The database name contains a hyphen, so it must be wrapped in brackets in T-SQL:
+
 ```sql
-CREATE DATABASE poc-cdc;
+CREATE DATABASE [poc-cdc];
 GO
-USE poc-cdc;
+USE [poc-cdc];
 GO
 CREATE TABLE dbo.Orders (
     Id INT IDENTITY PRIMARY KEY,
@@ -109,7 +121,7 @@ GO
 
 ### 3. Register the connector
 
-Set `database.password` in `connector.json` to the password configured in your `docker-compose.yml` (`<SA_PASSWORD>`):
+Set `database.names` to `poc-cdc` and `database.password` to the password configured in your `docker-compose.yml` (`<SA_PASSWORD>`) in `connector.json`, then:
 
 ```bash
 curl -X POST -H "Content-Type: application/json" \
@@ -121,10 +133,18 @@ curl http://localhost:8083/connectors/sqlserver-orders/status
 
 Both the connector and its task should be `RUNNING`.
 
+The topic name is built as `topic.prefix` + database + schema + table:
+
+```text
+poc . poc-cdc . dbo . Orders
+```
+
+The topic is created when the first event arrives, so insert a row before looking for it.
+
 ### 4. Run the consumer
 
 ```bash
-cd CdcConsumer
+cd src/CdcConsumer
 dotnet run
 ```
 
@@ -136,7 +156,7 @@ UPDATE dbo.Orders SET Total = 150 WHERE Customer = 'Ana';
 DELETE FROM dbo.Orders WHERE Customer = 'Ana';
 ```
 
-Events show up in the consumer log and in Redpanda Console: <http://localhost:8080>.
+Events show up in the consumer log, in Redpanda Console (<http://localhost:8080>), and in the Aspire dashboard (<http://localhost:18888>).
 
 ## Configuration (`appsettings.json`)
 
@@ -175,11 +195,25 @@ The connector uses the `ExtractNewRecordState` SMT, which flattens the event:
 
 `DECIMAL` values arrive as strings (`decimal.handling.mode=string`) to avoid base64 encoding.
 
+## Observability
+
+The consumer exports logs and traces over OTLP to a standalone Aspire dashboard.
+
+| What | Where |
+|---|---|
+| Dashboard UI | <http://localhost:18888> (login token is printed in the container logs) |
+| OTLP/gRPC endpoint | `http://localhost:4317` |
+| Logs | **Structured logs**, filter by the `cdc-consumer` resource |
+| Traces | **Traces**: one `process order change` span per message, tagged with the Kafka partition and offset, `order.id`, and `cdc.op` |
+
+Debezium does not propagate trace context in the messages, so each trace contains only the consumer span.
+
 ## Technical decisions
 
 - **Manual offset commits** after processing: guarantees *at-least-once* delivery.
 - **Source generators** for JSON (`JsonSerializerContext`) and logging (`[LoggerMessage]`): no runtime reflection.
 - **Graceful shutdown**: the Generic Host cancels the `CancellationToken` on SIGTERM/Ctrl+C and the consumer exits cleanly with `Close()`.
+- **Manual `ActivitySource`** for tracing, instead of a Kafka instrumentation package, to keep control over span tags.
 
 ## Considerations
 

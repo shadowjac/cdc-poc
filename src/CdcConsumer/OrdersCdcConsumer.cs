@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Text.Json;
 using CdcConsumer.Models;
 using Confluent.Kafka;
@@ -7,6 +8,9 @@ namespace CdcConsumer;
 
 public sealed partial class OrdersCdcConsumer : BackgroundService
 {
+    public const string ActivitySourceName = "CdcConsumer";
+    private static readonly ActivitySource Source = new(ActivitySourceName);
+    
     private readonly KafkaOptions _kafkaOptions;
     private readonly ILogger<OrdersCdcConsumer> _logger;
 
@@ -38,12 +42,22 @@ public sealed partial class OrdersCdcConsumer : BackgroundService
                 while (!stoppingToken.IsCancellationRequested)
                 {
                     var cr = consumer.Consume(stoppingToken);
+                    using var activity = Source.StartActivity("process order change", ActivityKind.Consumer);
+                    activity?.SetTag("messaging.system", "kafka");
+                    activity?.SetTag("messaging.destination.name", cr.Topic);
+                    activity?.SetTag("messaging.kafka.partition", cr.Partition.Value);
+                    activity?.SetTag("messaging.kafka.offset", cr.Offset.Value);
+                    
                     LogMessageReceived(cr.Message.Value);
 
                     if (cr.Message.Value is not null)
                     {
                         var order = JsonSerializer.Deserialize<OrderRow>(cr.Message.Value,
                             CdcJsonContext.Default.OrderRow!);
+                        
+                        activity?.SetTag("order.id", order!.Id);
+                        activity?.SetTag("cdc.op", order!.Op);
+                        
                         LogOrderChange(order!.Op, order.Id, order.Customer, order.Total, order.Deleted);
                     }
 
