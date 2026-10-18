@@ -1,4 +1,16 @@
 services:
+  consumer:
+    build:
+      context: src/CdcConsumer
+    container_name: cdc-consumer
+    depends_on:
+      - redpanda
+      - connect
+      - aspire-dashboard
+    environment:
+      Kafka__BootstrapServers: redpanda:9092
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://aspire-dashboard:18889
+    restart: unless-stopped
   sqlserver:
     image: mcr.microsoft.com/mssql/server:2022-latest
     platform: linux/amd64
